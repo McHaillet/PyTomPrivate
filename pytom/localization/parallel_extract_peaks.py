@@ -317,6 +317,7 @@ class PeakLeader(PeakWorker):
         totalMem = self.members
         numMemEach = totalMem//numPieces
         targetID = self.mpi_id
+        subjob_set_for_self = False
         
         for i in range(numPieces):
             strideZ = splitX*splitY; strideY = splitX
@@ -362,10 +363,14 @@ class PeakLeader(PeakWorker):
             subJobID = job.jobID+i+1
             subVol = Volume(job.volume.getFilename(),
                             [start[0], start[1], start[2], size[0], size[1], size[2]])
-            if i == 0:
+
+            if numMemEach == 0:
+                numMem = 1
+            elif i == 0:
                 numMem = totalMem - (numPieces-1)*numMemEach
             else:
                 numMem = numMemEach
+            print(f'--> setting a sub peak job with {numMem} member(s)')
             subJob = PeakJob(subVol, job.reference, job.mask, job.wedge, job.rotations, job.score, subJobID, numMem, self.dstDir, job.bandpass)
             
             from pytom.localization.peak_job import JobInfo
@@ -377,16 +382,23 @@ class PeakLeader(PeakWorker):
             info.origin = origin
             self.jobInfoPool[subJobID] = info
             
-            if targetID == self.mpi_id:
+            if targetID == self.mpi_id and not subjob_set_for_self:
+                if verbose:
+                    print(self.name + ' : own job set')
                 self.setJob(subJob)
+                subjob_set_for_self = True
                 if self.members > 1:
                     self.splitAngles(subJob, verbose)
             else:
-                if verbose==True:
+                if verbose:
                     print(self.name + ' : send part of the volume to ' + str(targetID))
                 subJob.send(self.mpi_id, targetID)
-            
-            targetID = targetID + numMem
+
+            if numMemEach == 0:
+                targetID = int((i + 1) * totalMem / numPieces)
+            else:
+                targetID = targetID + numMem
+
             self.jobInfoPool["numJobsV"] = self.jobInfoPool["numJobsV"] + 1
             
             
@@ -409,6 +421,8 @@ class PeakLeader(PeakWorker):
         numPieces = splitX*splitY*splitZ
         # see how many members do I have
         self.setJob(job)
+
+        print(f'on process {self.mpi_id} with {self.members} member(s) and {numPieces} pieces')
         
         if self.members == 1:
             pass
@@ -417,7 +431,7 @@ class PeakLeader(PeakWorker):
             self.jobInfoPool["numJobsA"] = 0
             self.jobInfoPool["numDoneJobsV"] = 0
             self.jobInfoPool["numJobsV"] = 0
-            if numPieces==0 or numPieces==1 or numPieces > self.members: # node num not enough for split vol
+            if numPieces==0 or numPieces==1:  # or numPieces > self.members: # node num not enough for split vol
                 self.splitAngles(job)
             else:
                 self.splitVolumes(job, splitX, splitY, splitZ)
@@ -516,8 +530,8 @@ class PeakLeader(PeakWorker):
             stepSizeY = min(vsize_y-sub_start[1], size_y)
             stepSizeZ = min(vsize_z-sub_start[2], size_z)
 
-            sub_resV = subvolume(resV, sub_start[0],sub_start[1],sub_start[2], stepSizeX,stepSizeY,stepSizeZ)
-            sub_resO = subvolume(orientV, sub_start[0],sub_start[1],sub_start[2], stepSizeX,stepSizeY,stepSizeZ)
+            sub_resV = subvolume(resV, sub_start[0], sub_start[1], sub_start[2], stepSizeX, stepSizeY, stepSizeZ)
+            sub_resO = subvolume(orientV, sub_start[0], sub_start[1], sub_start[2], stepSizeX, stepSizeY, stepSizeZ)
 
             # print('aaa:  ', self.resVol.__class__, self.resVol.sum(), sub_resV.shape, sub_resV.sum(),  start[0]-originX, start[1]-originY,start[2]-originZ)
 
@@ -557,15 +571,15 @@ class PeakLeader(PeakWorker):
         @type splitZ: integer
         """
         import pytom.lib.pytom_mpi as pytom_mpi
-        if self.mpi_id == 0: # send the first message
+        if self.mpi_id == 0:  # send the first message
             if not pytom_mpi.isInitialised():
                 pytom_mpi.init()
             job.members = pytom_mpi.size()
             print('job members', job.members)
             self.distributeJobs(job, splitX, splitY, splitZ)
+            print('finished distribution, now run')
             result = self.run(verbose, gpuID=gpuID)
             self.summarize(result, self.jobID)
-            #job.send(0, 0)
 
         self.gpuID = gpuID
         end = False

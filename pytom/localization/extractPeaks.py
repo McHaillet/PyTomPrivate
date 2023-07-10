@@ -73,7 +73,7 @@ def extractPeaks(volume, reference, rotations, scoreFnc=None, mask=None, maskIsS
         sqrV = None
 
     if wedgeInfo.__class__ == WedgeInfo or wedgeInfo.__class__ == Wedge:
-        print('Applied wedge to volume')
+        print(f'Applied wedge to volume of dim ({volume.size_x()},{volume.size_y()},{volume.size_z()})')
         volume = wedgeInfo.apply(volume)
 
     while currentRotation != [None,None,None]:
