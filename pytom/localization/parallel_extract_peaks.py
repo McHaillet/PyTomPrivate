@@ -90,6 +90,8 @@ class PeakWorker(object):
             m = self.mask.getVolume()
             mIsSphere = self.mask.isSphere()
         rot = self.rotations
+        # Reset the counter because the rotation object is the same for all subvolumes on the same mpi process
+        rot.reset()
         wedg = self.wedge
         scoreFnc = self.score.getScoreFunc()
         
@@ -138,6 +140,8 @@ class PeakLeader(PeakWorker):
         self.name = 'node_' + str(self.mpi_id)
 
         self.size = pytom_mpi.size()
+
+        self.job_queue = []
 
         self.clean()
         
@@ -317,7 +321,6 @@ class PeakLeader(PeakWorker):
         totalMem = self.members
         numMemEach = totalMem//numPieces
         targetID = self.mpi_id
-        subjob_set_for_self = False
         
         for i in range(numPieces):
             strideZ = splitX*splitY; strideY = splitX
@@ -342,11 +345,6 @@ class PeakLeader(PeakWorker):
             
             size = [end[j]-start[j] for j in range(len(start))]
             
-            # make sure that the last dimension is not odd
-            # if size[2]%2 == 1:
-            #     size[2] = size[2] - 1
-            #     end[2] = end[2] - 1
-            
             # for reassembling the result
             whole_start = start[:]
             sub_start = [0, 0, 0]
@@ -370,8 +368,15 @@ class PeakLeader(PeakWorker):
                 numMem = totalMem - (numPieces-1)*numMemEach
             else:
                 numMem = numMemEach
+
             print(f'--> setting a sub peak job with {numMem} member(s)')
-            subJob = PeakJob(subVol, job.reference, job.mask, job.wedge, job.rotations, job.score, subJobID, numMem, self.dstDir, job.bandpass)
+            print(f'--> does more need to be send? {subJobID}, {(i + totalMem) < numPieces}')
+
+            # If current subvolume index with a full around of assigment (totalMem) is still smaller than the total
+            # number of pieces, it means the target (i % totalMem) will need to receive another job
+            subJob = PeakJob(subVol, job.reference, job.mask, job.wedge, job.rotations,
+                             job.score, subJobID, numMem, self.dstDir, job.bandpass,
+                             more_to_come=(i + totalMem) < numPieces)
             
             from pytom.localization.peak_job import JobInfo
             info = JobInfo(subJob.jobID, originalJobID, "Vol")
@@ -382,11 +387,12 @@ class PeakLeader(PeakWorker):
             info.origin = origin
             self.jobInfoPool[subJobID] = info
             
-            if targetID == self.mpi_id and not subjob_set_for_self:
+            if targetID == self.mpi_id:
                 if verbose:
                     print(self.name + ' : own job set')
+                self.job_queue.append(subJob)
                 self.setJob(subJob)
-                subjob_set_for_self = True
+                # subjob_set_for_self = True
                 if self.members > 1:
                     self.splitAngles(subJob, verbose)
             else:
@@ -395,7 +401,7 @@ class PeakLeader(PeakWorker):
                 subJob.send(self.mpi_id, targetID)
 
             if numMemEach == 0:
-                targetID = int((i + 1) * totalMem / numPieces)
+                targetID = (i + 1) % totalMem  # int((i + 1) * totalMem / numPieces)
             else:
                 targetID = targetID + numMem
 
@@ -422,16 +428,17 @@ class PeakLeader(PeakWorker):
         # see how many members do I have
         self.setJob(job)
 
-        print(f'on process {self.mpi_id} with {self.members} member(s) and {numPieces} pieces')
-        
-        if self.members == 1:
+        print(f'starting job {self.jobID} on process {self.mpi_id} with'
+              f' {self.members} member(s) and {numPieces} pieces')
+
+        if self.members == 1 and not numPieces > 1:
             pass
         else:
             self.jobInfoPool["numDoneJobsA"] = 0
             self.jobInfoPool["numJobsA"] = 0
             self.jobInfoPool["numDoneJobsV"] = 0
             self.jobInfoPool["numJobsV"] = 0
-            if numPieces==0 or numPieces==1:  # or numPieces > self.members: # node num not enough for split vol
+            if numPieces == 0 or numPieces == 1:  # or numPieces > self.members: # node num not enough for split vol
                 self.splitAngles(job)
             else:
                 self.splitVolumes(job, splitX, splitY, splitZ)
@@ -449,8 +456,6 @@ class PeakLeader(PeakWorker):
         
         @rtype: L{pytom.localization.peak_job.PeakResult}
         """
-
-
         if jobID != None:
             resFilename = self.dstDir + self.name + '_job' + str(jobID) + '_res.em'
             orientFilename = self.dstDir + self.name + '_job' + str(jobID) + '_orient.em'
@@ -575,11 +580,10 @@ class PeakLeader(PeakWorker):
             if not pytom_mpi.isInitialised():
                 pytom_mpi.init()
             job.members = pytom_mpi.size()
-            print('job members', job.members)
             self.distributeJobs(job, splitX, splitY, splitZ)
             print('finished distribution, now run')
-            result = self.run(verbose, gpuID=gpuID)
-            self.summarize(result, self.jobID)
+            for result in self.run_queue(verbose, gpuID):
+                self.summarize(result, self.jobID)
 
         self.gpuID = gpuID
         end = False
@@ -589,19 +593,19 @@ class PeakLeader(PeakWorker):
             
             msgType = self.getMsgType(mpi_msgString)
             
-            if msgType == 2: # Job msg
+            if msgType == 2:  # Job msg
                 msg = self.getJobMsg(mpi_msgString)
-                job = self.jobFromMsg(msg) # set members
+                job = self.jobFromMsg(msg)  # set members
+                print(job.jobID, job.more_to_come)
+
+                if job.more_to_come:
+                    self.job_queue.append(job)
+                    continue  # wait to receive all jobs first
+
+                for result in self.run_queue(verbose, gpuID):
+                    self.summarize(result, self.jobID)
                 
-                if self.mpi_id == 0:
-                    self.distributeJobs(job, splitX, splitY, splitZ)
-                else:
-                    self.distributeJobs(job)
-                
-                result = self.run(verbose, gpuID=gpuID)
-                self.summarize(result, self.jobID)
-                
-            elif msgType == 1: # Result msg
+            elif msgType == 1:  # Result msg
                 msg = self.getResMsg(mpi_msgString)
                 res = self.resFromMsg(msg)
                 
@@ -623,6 +627,7 @@ class PeakLeader(PeakWorker):
                     end = True
                     if verbose==True:
                         print(self.name + ': end')
+
             else: # Error
                 raise RuntimeError("False message type!")
         
@@ -659,17 +664,11 @@ class PeakLeader(PeakWorker):
             msg = StatusMessage(str(self.mpi_id), str(i))
             msg.setStatus("End")
             pytom_mpi.send(str(msg), i)
-            
-            
-    def parallelRunMultiJobs(self, jobs, splitX=0, splitY=0, splitZ=0, verbose=True):
-        for i in range(len(jobs)):
-            job = jobs[i]
-            
-            if self.mpi_id == 0:
-                from pytom.tools.files import checkDirExists
-                new_dir = job.dstDir + 'Job_' + str(i)
-                if not checkDirExists(new_dir):
-                    os.mkdir(new_dir)
-                job.dstDir = new_dir
-            
-            self.parallelRun(job, splitX, splitY, splitZ, verbose)
+
+    def run_queue(self, verbose, gpuID):
+        results = []
+        print(f' jobs to run: {len(self.job_queue)}')
+        for job in self.job_queue:
+            self.distributeJobs(job)
+            results.append(self.run(verbose, gpuID=gpuID))
+        return results

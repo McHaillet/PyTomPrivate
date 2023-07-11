@@ -11,7 +11,8 @@ class PeakJob(PyTomClass):
     PeakJob: stores all the infos needed for calculation of the peak score
     """
     
-    def __init__(self, volume='', reference='', mask='', wedge='', rotations='', score='', jobID=0, members=1, dstDir='./', bandpass=None):
+    def __init__(self, volume='', reference='', mask='', wedge='', rotations='', score='', jobID=0, members=1,
+                 dstDir='./', bandpass=None, more_to_come=False):
         """
         @param volume: target volume
         @type volume: L{pytom.localization.structures.Volume}
@@ -47,6 +48,7 @@ class PeakJob(PyTomClass):
         else:
             self.dstDir = dstDir + '/'
         self.bandpass = bandpass
+        self.more_to_come = more_to_come
             
     def copy(self, fromJob):
         self.volume = fromJob.volume
@@ -59,6 +61,7 @@ class PeakJob(PyTomClass):
         self.members = fromJob.members
         self.dstDir = fromJob.dstDir
         self.bandpass = fromJob.bandpass
+        self.more_to_come = fromJob.more_to_come
         
     def fromXML(self, xmlObj):
         """
@@ -82,19 +85,23 @@ class PeakJob(PyTomClass):
             jobDescription = jobDescription[0]
         
         id = jobDescription.get('ID')
-        if id != None and id != 'None':
+        if id is not None and id != 'None':
             self.jobID = int(id)
             
         members = jobDescription.get('Members')
-        if members != None and members != 'None':
+        if members is not None and members != 'None':
             self.members = int(members)
         
         dstDir = jobDescription.get('Destination')
-        if dstDir != None:
+        if dstDir is not None:
             if dstDir[-1] == '/':
                 self.dstDir = dstDir
             else:
                 self.dstDir = dstDir + '/'
+
+        more_to_come = jobDescription.get('ExpectingMoreJobs')
+        if more_to_come is not None:
+            self.more_to_come = eval(more_to_come)
 
         from pytom.basic.score import fromXML as fromXMLScore
         from pytom.basic.structures import Mask,Reference,Wedge
@@ -158,7 +165,8 @@ class PeakJob(PyTomClass):
         
         from lxml import etree
              
-        jobElement = etree.Element("JobDescription", ID=str(self.jobID), Members=str(self.members), Destination=str(self.dstDir))
+        jobElement = etree.Element("JobDescription", ID=str(self.jobID), Members=str(self.members),
+                                   Destination=str(self.dstDir), ExpectingMoreJobs=str(self.more_to_come))
         
         jobElement.append(self.volume.toXML())
         jobElement.append(self.reference.toXML())

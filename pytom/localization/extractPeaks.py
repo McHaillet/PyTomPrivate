@@ -57,6 +57,7 @@ def extractPeaks(volume, reference, rotations, scoreFnc=None, mask=None, maskIsS
     orientation.setAll(0)
     
     currentRotation = rotations.nextRotation()
+    print(currentRotation)
     index = 0
     
     if verbose == True:
